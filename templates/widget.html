@@ -1,0 +1,130 @@
+<div id="insectica-voice-root"></div>
+<script>
+  window.InsecticaVoice = { apiBase: "http://127.0.0.1:8000/api" };
+</script>
+
+<script>
+(function(){
+  const API_BASE = (window.InsecticaVoice && window.InsecticaVoice.apiBase) || "/api";
+  let conversationId = null;
+  let mediaRecorder = null;
+  let isRecording = false;
+  let chunks = [];
+  let fileExt = "webm";
+
+  function ui(){
+    const root = document.getElementById("insectica-voice-root");
+    root.innerHTML = "";
+    const style = document.createElement("style");
+    style.textContent = `
+      .iv-box{font-family:system-ui,sans-serif;max-width:360px;padding:16px;border:1px solid #e5e7eb;border-radius:16px;box-shadow:0 2px 12px rgba(0,0,0,.06)}
+      .iv-title{font-weight:700;margin-bottom:8px}
+      .iv-status{font-size:12px;color:#6b7280;margin:4px 0 8px}
+      .iv-reply{min-height:48px;background:#f9fafb;padding:10px;border-radius:10px;margin:8px 0}
+      .iv-row{display:flex;align-items:center;gap:10px}
+      .iv-btn{width:56px;height:56px;border-radius:9999px;border:0;background:#111827;color:#fff;cursor:pointer;font-size:18px}
+      .iv-btn.rec{background:#dc2626}
+      .iv-btn:disabled{opacity:.6;cursor:not-allowed}
+    `;
+    const box = document.createElement("div"); box.className="iv-box";
+    const title = document.createElement("div"); title.className="iv-title"; title.textContent="🎙️ Insectica • Sara";
+    const status = document.createElement("div"); status.id="iv-status"; status.className="iv-status"; status.textContent="Ready";
+    const reply = document.createElement("div"); reply.id="iv-reply"; reply.className="iv-reply"; reply.textContent="Press to speak.";
+    const audio = document.createElement("audio"); audio.id="iv-audio"; audio.controls = true;
+    const btn = document.createElement("button"); btn.id="iv-btn"; btn.className="iv-btn"; btn.textContent="🎤";
+
+    const row = document.createElement("div"); row.className="iv-row";
+    row.appendChild(btn); row.appendChild(audio);
+
+    box.appendChild(title); box.appendChild(status); box.appendChild(reply); box.appendChild(row);
+    root.appendChild(style); root.appendChild(box);
+  }
+
+  function setStatus(t){ const s = document.getElementById("iv-status"); if(s) s.textContent = t; }
+  function setReply(t){ const r = document.getElementById("iv-reply"); if(r) r.textContent = t; }
+  function setBtnRecording(v){
+    const b = document.getElementById("iv-btn");
+    if(!b) return;
+    if(v){ b.classList.add("rec"); b.textContent="■"; } else { b.classList.remove("rec"); b.textContent="🎤"; }
+  }
+
+  async function startConversation(){
+    const res = await fetch(`${API_BASE}/start/`, { method: "POST" });
+    if(!res.ok){ throw new Error(`start failed: ${res.status}`); }
+    const j = await res.json();
+    conversationId = j.conversation_id;
+  }
+
+  function chooseMime(){
+    if(typeof MediaRecorder === "undefined") return {mime: "", ext: "webm"};
+    if(MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported("audio/webm;codecs=opus"))
+      return {mime: "audio/webm;codecs=opus", ext: "webm"};
+    if(MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported("audio/mp4"))
+      return {mime: "audio/mp4", ext: "mp4"};
+    return {mime: "", ext: "webm"}; // let browser decide
+  }
+
+  async function toggleRecord(){
+    const btn = document.getElementById("iv-btn");
+    const audioEl = document.getElementById("iv-audio");
+    if(!isRecording){
+      if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+        setStatus("Mic not available. Use HTTPS/Chrome.");
+        return;
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const pick = chooseMime(); fileExt = pick.ext;
+      chunks = [];
+      try {
+        mediaRecorder = pick.mime ? new MediaRecorder(stream, { mimeType: pick.mime }) : new MediaRecorder(stream);
+      } catch(e){
+        setStatus("Recorder init failed"); console.error(e); return;
+      }
+      mediaRecorder.ondataavailable = ev => { if(ev.data && ev.data.size) chunks.push(ev.data); };
+      mediaRecorder.onstop = async ()=>{
+        try{
+          setStatus("Uploading...");
+          const blob = new Blob(chunks, { type: pick.mime || "audio/webm" });
+          const form = new FormData();
+          form.append("audio", blob, `input.${fileExt}`);
+          form.append("duration_ms", 0);
+          const res = await fetch(`${API_BASE}/conversations/${conversationId}/ingest_audio/`, { method:"POST", body: form });
+          const j = await res.json();
+          if(!res.ok){ throw new Error(j.detail || `ingest ${res.status}`); }
+          setReply(j.assistant_text || "(no text)");
+          audioEl.src = j.assistant_audio_url;
+          audioEl.play().catch(()=>{});
+          setStatus("Ready");
+        }catch(err){
+          console.error(err);
+          setStatus("Upload/AI error");
+          setReply(String(err));
+        }
+      };
+      mediaRecorder.start();
+      isRecording = true; setBtnRecording(true); setStatus("Recording...");
+    }else{
+      mediaRecorder && mediaRecorder.stop();
+      isRecording = false; setBtnRecording(false); setStatus("Processing...");
+    }
+  }
+
+  async function init(){
+    ui();
+    try{
+      setStatus("Connecting...");
+      await startConversation();
+      setStatus("Ready");
+    }catch(e){
+      console.error(e);
+      setStatus("API not reachable");
+      setReply("Check API: " + API_BASE);
+      return;
+    }
+    const btn = document.getElementById("iv-btn");
+    btn.addEventListener("click", toggleRecord);
+  }
+
+  if(document.readyState==="loading") document.addEventListener("DOMContentLoaded", init); else init();
+})();
+</script>

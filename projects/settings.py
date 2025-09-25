@@ -60,11 +60,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'apps.agents',
-    'apps.dashboard',
     'apps.voice',
-    'apps.embeds',
-    'apps.users',
     'rest_framework',
     'corsheaders',
     'rest_framework_simplejwt.token_blacklist',
@@ -73,12 +69,11 @@ INSTALLED_APPS = [
 
 
 REST_FRAMEWORK = {
-    'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
-    ),
-    # 'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
-    # 'PAGE_SIZE': 10,  # Default items per page
+    "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
+    "DEFAULT_AUTHENTICATION_CLASSES": [],  # DEV
+    "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.AllowAny"],  # DEV
 }
+
 
 
 from datetime import timedelta
@@ -105,7 +100,6 @@ MIDDLEWARE = [
 
 ROOT_URLCONF = 'projects.urls'
 
-AUTH_USER_MODEL = 'users.User'
 
 TEMPLATES_DIR = os.path.join(BASE_DIR,'templates')
 
