@@ -205,6 +205,11 @@ load_dotenv()  # Load variables from .env
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 
+# Vapi config
+VAPI_API_KEY = os.getenv("VAPI_API_KEY", "")
+VAPI_BASE_URL = os.getenv("VAPI_BASE_URL", "https://api.vapi.ai")
+
+
 # Gmail SMTP server Settings
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = 'smtp.gmail.com'  # Gmail SMTP server

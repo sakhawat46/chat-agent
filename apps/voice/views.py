@@ -1,74 +1,109 @@
-from django.utils import timezone
-from django.core.files.base import ContentFile
-from rest_framework import viewsets
-from rest_framework.decorators import action
-from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.response import Response
 from rest_framework import status
+from django.http import StreamingHttpResponse
 
-from .models import Conversation, Utterance
-from .serializers import ConversationSerializer, UtteranceSerializer
-from apps.voice.services.openai_client import transcribe_audio, chat_completion, synthesize_speech
-from apps.voice.services.prompt import INSECTICA_SYSTEM_PROMPT
-from apps.voice.services.booking import BookingPolicy
+from .serializers import (
+    AssistantCreateSerializer,
+    AssistantResponseSerializer,
+    ChatCreateSerializer,
+)
+from .models import Assistant
+from .services.vapi import VapiClient, VapiError
 
 
-
-class ConversationViewSet(viewsets.ModelViewSet):
-    queryset = Conversation.objects.all().order_by("-created_at")
-    serializer_class = ConversationSerializer
-    parser_classes = [MultiPartParser, FormParser]
-
-    @action(detail=True, methods=["post"], url_path="ingest_audio")
-    def ingest_audio(self, request, pk=None):
-        convo = self.get_object()
-        audio_file = request.FILES.get("audio")
-        duration_ms = int(request.data.get("duration_ms", 0))
-        if not audio_file:
-            return Response({"detail": "audio required"}, status=400)
-
-        # 1) ইউজার অডিও সেভ
-        user_uttr = Utterance.objects.create(
-            conversation=convo, role="user", audio=audio_file, duration_ms=duration_ms
-        )
-
-        # 2) STT
-        text = transcribe_audio(user_uttr.audio.path)
-        user_uttr.text = text
-        user_uttr.save()
-
-        # 3) কনটেক্সট বিল্ড
-        messages = [{"role": "system", "content": INSECTICA_SYSTEM_PROMPT}]
-        for u in convo.utterances.all().order_by("created_at"):
-            messages.append({"role": u.role, "content": u.text or ""})
-
-        # 4) অ্যাসিস্ট্যান্ট টেক্সট
-        assistant_text = chat_completion(messages)
-
-        # 5) TTS
-        audio_bytes = synthesize_speech(assistant_text)
-        filename = f"assistant_{timezone.now().timestamp()}.mp3"
-        assistant_audio_field = ContentFile(audio_bytes, name=filename)
-
-        asr_uttr = Utterance.objects.create(
-            conversation=convo, role="assistant", text=assistant_text, audio=assistant_audio_field
-        )
-
-        return Response({
-            "assistant_text": assistant_text,
-            "assistant_audio_url": asr_uttr.audio.url,
-            "utterance": UtteranceSerializer(asr_uttr).data,
-        }, status=200)
-
-    @action(detail=True, methods=["get"], url_path="summary")
-    def summary(self, request, pk=None):
-        convo = self.get_object()
-        data = ConversationSerializer(convo).data
-        return Response(data)
-
-class StartConversation(APIView):
+class AssistantCreateView(APIView):
     def post(self, request):
-        label = request.data.get("session_label", "web-embed")
-        convo = Conversation.objects.create(session_label=label)
-        return Response({"conversation_id": convo.id}, status=201)
+        s = AssistantCreateSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data
+
+        client = VapiClient()
+        try:
+            v = client.create_assistant(
+                name=data.get("name"),
+                first_message=data["first_message"],
+                system_prompt=data["system_prompt"],
+                model_provider=data.get("model_provider", "anthropic"),
+                model_name=data.get("model_name", "claude-3-sonnet-20240229"),
+            )
+        except VapiError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        assistant = Assistant.objects.create(
+            name=data.get("name", ""),
+            vapi_assistant_id=v.get("id"),
+            first_message=data["first_message"],
+            system_prompt=data["system_prompt"],
+            model_provider=data.get("model_provider", "anthropic"),
+            model_name=data.get("model_name", "claude-3-sonnet-20240229"),
+        )
+
+        out = AssistantResponseSerializer({
+            "id": assistant.id,
+            "vapi_assistant_id": assistant.vapi_assistant_id,
+            "name": assistant.name,
+        }).data
+        return Response(out, status=status.HTTP_201_CREATED)
+
+
+class ChatCreateView(APIView):
+    """
+    Non-streaming chat: waits for full response.
+    Use this if you want a single JSON after the model finishes.
+    """
+    def post(self, request):
+        s = ChatCreateSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data
+
+        client = VapiClient()
+        try:
+            chat = client.create_chat(
+                assistant_id=data["assistant_id"],
+                input_text=data["input"],
+            )
+        except VapiError as e:
+            # Upstream slow or error → return 504/502 accordingly
+            msg = str(e)
+            status_code = status.HTTP_504_GATEWAY_TIMEOUT if "ReadTimeout" in msg else status.HTTP_502_BAD_GATEWAY
+            return Response({"detail": msg}, status=status_code)
+
+        answer = VapiClient.extract_answer(chat)
+        return Response({"assistant_answer": answer, "raw": chat}, status=status.HTTP_200_OK)
+
+
+class ChatStreamView(APIView):
+    """
+    Streaming chat via Server-Sent Events (SSE).
+    This returns chunks as they arrive; great for long generations.
+    """
+    def post(self, request):
+        s = ChatCreateSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data
+
+        client = VapiClient()
+        try:
+            lines = client.create_chat_stream(
+                assistant_id=data["assistant_id"],
+                input_text=data["input"],
+            )
+        except VapiError as e:
+            msg = str(e)
+            status_code = status.HTTP_504_GATEWAY_TIMEOUT if "ReadTimeout" in msg else status.HTTP_502_BAD_GATEWAY
+            return Response({"detail": msg}, status=status_code)
+
+        def event_stream():
+            # If upstream sends SSE, lines typically look like: "data: {...}"
+            try:
+                for line in lines:
+                    if not line:
+                        continue
+                    # Pass through as raw line per SSE (client can parse)
+                    yield line + "\n"
+            except Exception:
+                # end stream gracefully on any error
+                yield "event: error\ndata: stream_ended\n\n"
+
+        return StreamingHttpResponse(event_stream(), content_type="text/event-stream")

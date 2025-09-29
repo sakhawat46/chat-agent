@@ -1,19 +1,17 @@
 from rest_framework import serializers
-from .models import Conversation, Utterance
 
-class UtteranceSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Utterance
-        fields = ["id","role","text","audio","duration_ms","created_at"]
+class AssistantCreateSerializer(serializers.Serializer):
+    name = serializers.CharField(required=False, allow_blank=True)
+    first_message = serializers.CharField()
+    system_prompt = serializers.CharField()
+    model_provider = serializers.CharField(required=False, default="anthropic")
+    model_name = serializers.CharField(required=False, default="claude-3-sonnet-20240229")
 
-class ConversationSerializer(serializers.ModelSerializer):
-    utterances = UtteranceSerializer(many=True, read_only=True)
+class AssistantResponseSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    vapi_assistant_id = serializers.CharField()
+    name = serializers.CharField(allow_blank=True)
 
-    class Meta:
-        model = Conversation
-        fields = [
-            "id","created_at","updated_at","session_label",
-            "name","phone","address","postal_code","city",
-            "customer_type","bedrooms","pest_type","notes",
-            "booking_time","escalated","utterances"
-        ]
+class ChatCreateSerializer(serializers.Serializer):
+    assistant_id = serializers.CharField(help_text="Vapi assistant id")
+    input = serializers.CharField()

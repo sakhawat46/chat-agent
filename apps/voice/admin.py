@@ -1,5 +1,4 @@
 from django.contrib import admin
-from .models import Conversation, Utterance
+from .models import *
 
-admin.site.register(Conversation)
-admin.site.register(Utterance)
+admin.site.register(Assistant)
